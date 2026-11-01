@@ -1,0 +1,184 @@
+# BDGET – Cloud Native (CDY2204) · Semana 1 y 2
+
+Microservicio Spring Boot que combina:
+
+- **Semana 1:** CRUD de estudiantes con persistencia en **Oracle Autonomous Database** y despliegue continuo con **GitHub Actions → Docker Hub → AWS EC2**.
+- **Semana 2:** gestión de archivos en la nube con **Amazon S3** (listar, leer, descargar, subir, mover y eliminar objetos de un bucket) usando **Spring Cloud AWS**.
+
+## Arquitectura
+
+```
+                    push a main
+ Desarrollador ─────────────────► GitHub Actions
+                                    1. Inyecta credenciales de BD (secrets)
+                                    2. Build de la imagen Docker
+                                    3. Push a Docker Hub
+                                    4. SSH a EC2 → docker pull + docker run
+                                       (pasa credenciales AWS como variables de entorno)
+                                    ▼
+                         ┌──────── EC2 (Docker) ────────┐
+   Postman ───:8080────► │  my-app (Spring Boot)        │
+                         └───────┬──────────────┬───────┘
+                                 │ JDBC + wallet│ AWS SDK
+                                 ▼              ▼
+                     Oracle Autonomous DB    Amazon S3 (bucket)
+                     (tabla STUDENT)
+```
+
+## Tecnologías
+
+| Tecnología | Uso |
+|---|---|
+| Java 17 / Spring Boot 3.3 | Aplicación |
+| Spring Data JPA + Oracle JDBC (`ojdbc11`, `oraclepki`, `osdt_*`) | Persistencia en Oracle con wallet |
+| Spring Cloud AWS 2.3 (AWS SDK v1) | Cliente de Amazon S3 |
+| Lombok | Modelo `Asset` (`@Value`, `@Builder`) |
+| JUnit 5 + Mockito + JaCoCo | Pruebas y cobertura |
+| Docker / GitHub Actions / EC2 / Docker Hub | CI/CD y despliegue |
+
+## Estructura
+
+```
+src/main/java/com/example/bdget
+├── BdgetApplication.java
+├── config/
+│   └── StorageConfig.java         # Bean AmazonS3 con credenciales de sesión AWS
+├── controller/
+│   ├── StudentController.java     # /students  (Semana 1)
+│   └── AwsController.java         # /s3        (Semana 2)
+├── exception/
+│   └── GlobalExceptionHandler.java
+├── model/
+│   ├── Student.java               # Entidad JPA
+│   └── Asset.java                 # Objeto de S3 (name, key, url)
+├── repository/
+│   ├── StudentRepository.java
+│   ├── S3Repository.java          # Interfaz de operaciones S3
+│   └── S3RepositoryImpl.java      # Implementación con AmazonS3
+└── service/
+    ├── StudentService.java / StudentServiceImpl.java
+    └── AwsService.java / AwsServiceImpl.java
+src/main/resources
+├── application.properties         # Datasource Oracle (placeholders <db_*>)
+└── application.yml                # Credenciales y región AWS (variables de entorno)
+wallet/                            # Wallet de Oracle Autonomous DB
+```
+
+## Endpoints
+
+### Estudiantes – `/students` (Semana 1)
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/students` | Lista todos los estudiantes |
+| GET | `/students/{id}` | Obtiene un estudiante |
+| POST | `/students` | Crea un estudiante – body: `{"name": "Matias"}` |
+| PUT | `/students/{id}` | Actualiza un estudiante |
+| DELETE | `/students/{id}` | Elimina un estudiante |
+
+### Amazon S3 – `/s3` (Semana 2)
+
+| Método | Ruta | Parámetros | Descripción |
+|---|---|---|---|
+| GET | `/s3/listS3Files` | `bucketName` | Lista los objetos del bucket |
+| GET | `/s3/getS3FileContent` | `bucketName`, `fileName` | Devuelve el contenido de un archivo de texto |
+| GET | `/s3/downloadS3File` | `bucketName`, `filePath`, `fileName` | Descarga un archivo (en Postman: *Save response to file*) |
+| POST | `/s3/uploadFile` | `bucketName`, `filePath` + body form-data `file` (tipo File) | Sube un archivo; se guarda como `filePath + timestamp_nombre` |
+| GET | `/s3/moveFile` | `bucketName`, `fileName`, `fileNameDest` | Mueve o renombra un objeto (copia + elimina el original) |
+| DELETE | `/s3/deleteObject` | `bucketName`, `fileName` | Elimina un objeto |
+
+Ejemplos (reemplaza `<host>` por `localhost` o la IP de la EC2, y `<bucket>` por el nombre de tu bucket):
+
+```
+GET    http://<host>:8080/s3/listS3Files?bucketName=<bucket>
+GET    http://<host>:8080/s3/getS3FileContent?bucketName=<bucket>&fileName=hola.txt
+GET    http://<host>:8080/s3/downloadS3File?bucketName=<bucket>&filePath=&fileName=hola.txt
+POST   http://<host>:8080/s3/uploadFile?bucketName=<bucket>&filePath=folder/
+GET    http://<host>:8080/s3/moveFile?bucketName=<bucket>&fileName=hola.txt&fileNameDest=folder/hola.txt
+DELETE http://<host>:8080/s3/deleteObject?bucketName=<bucket>&fileName=folder/hola.txt
+```
+
+## Configuración
+
+### 1. Oracle Autonomous Database
+
+- La carpeta `wallet/` contiene la wallet de la base **DBEJERCICIOS**; el `Dockerfile` la copia a `/app/wallet` y define `TNS_ADMIN=/app/wallet`.
+- `spring.jpa.hibernate.ddl-auto=none`: la tabla se crea manualmente (Database Actions → SQL, con el usuario de la aplicación):
+
+```sql
+CREATE TABLE student (
+  id   NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  name VARCHAR2(50)
+);
+```
+
+### 2. Bucket de Amazon S3
+
+1. AWS Academy → Learner Lab → **Start Lab** → consola de AWS → **S3** → **Create bucket**.
+2. Nombre único (por ejemplo `mibucketduocs3` + iniciales), región `us-east-1`.
+3. Desmarcar *Block all public access* y confirmar.
+4. Crear el bucket y subir un archivo de prueba (`hola.txt` con el texto "Hola Mundo!").
+
+### 3. Credenciales de AWS
+
+`application.yml` lee las credenciales desde variables de entorno (nunca se escriben en el código):
+
+```yaml
+cloud:
+  aws:
+    credentials:
+      access-key: ${AWS_ACCESS_KEY_ID}
+      secret-key: ${AWS_SECRET_ACCESS_KEY}
+      session-token: ${AWS_SESSION_TOKEN}
+    region:
+      static: us-east-1
+```
+
+En la EC2, el workflow las entrega al contenedor con `docker run -e ...` a partir de los GitHub Secrets.
+
+> ⚠️ Las credenciales del Learner Lab **vencen al terminar cada sesión**. Al iniciar una nueva sesión:
+> copiar los valores de *AWS Details* → actualizar los 3 secrets `AWS_*` en GitHub → **Re-run all jobs** en Actions.
+
+## CI/CD – `.github/workflows/main.yml`
+
+Se ejecuta con cada push o pull request a `main`:
+
+1. **Checkout** del repositorio.
+2. **Inyección de credenciales de BD**: reemplaza `<db_url>`, `<db_username>` y `<db_password>` en `application.properties` con los secrets.
+3. **Login en Docker Hub**, **build** y **push** de la imagen `my-app:latest`.
+4. **Configuración de credenciales AWS** (`aws-actions/configure-aws-credentials`).
+5. **Despliegue en EC2 por SSH**: `docker pull`, detiene el contenedor anterior y ejecuta el nuevo en el puerto 8080 con las credenciales de AWS como variables de entorno.
+
+### Secrets requeridos (Settings → Secrets and variables → Actions)
+
+| Secret | Valor |
+|---|---|
+| `DB_URL` | `jdbc:oracle:thin:@dbejercicios_tp?TNS_ADMIN=/app/wallet` |
+| `DB_USERNAME` | Usuario de la base de datos |
+| `DB_PASSWORD` | Contraseña de la base de datos |
+| `DOCKERHUB_USERNAME` | Usuario de Docker Hub |
+| `DOCKERHUB_TOKEN` | Access token de Docker Hub |
+| `AWS_ACCESS_KEY_ID` | Learner Lab → AWS Details |
+| `AWS_SECRET_ACCESS_KEY` | Learner Lab → AWS Details |
+| `AWS_SESSION_TOKEN` | Learner Lab → AWS Details |
+| `EC2_SSH_KEY` | Contenido completo de la llave `.pem` |
+| `USER_SERVER` | `ec2-user` |
+| `EC2_HOST` | IP elástica de la EC2 |
+
+### Requisitos de la EC2
+
+- Docker instalado y en ejecución (`sudo systemctl enable --now docker`), con `ec2-user` en el grupo `docker`.
+- Security Group con los puertos **22** (SSH) y **8080** (API) abiertos.
+
+## Seguridad
+
+- El repositorio y la imagen en Docker Hub deben ser **privados**: la imagen contiene la wallet y la configuración de la base de datos inyectada en el build.
+- Las credenciales de AWS no se incluyen en la imagen; se entregan al contenedor al momento de ejecutarlo.
+
+## Pruebas
+
+```bash
+./mvnw test
+```
+
+Incluye pruebas unitarias del modelo, del servicio (Mockito) y del controlador (`@WebMvcTest`), con reporte de cobertura JaCoCo en `target/site/jacoco/`.
